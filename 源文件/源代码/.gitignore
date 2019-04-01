@@ -1,0 +1,29 @@
+# build dirs
+Code/CellSegmentor/build*
+Code/Protobuf/build
+
+# eclipse stuff
+.project
+.pydevproject
+
+# extraneous autocad files
+*.bak
+*.dwl
+*.dwl2
+
+# ipython notebook stuff
+*.ipynb_checkpoints
+
+# jetbrains stuff
+.idea
+*.iml
+
+# osx stuff
+.DS_Store
+
+# python stuff
+*.egg-info
+*.pyc
+
+# vim stuff
+*.swp

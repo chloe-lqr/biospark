@@ -1,0 +1,104 @@
+#!/bin/bash
+# This script starts a Spark cluster instance.
+
+if [ -z "$8" ]; then
+  echo "Usage: $0 execution_script arguments* source_dir install_dir master_hostname number_nodes slaves_file local_tmp_dir log_dir"
+  exit
+fi
+
+# Parse the arguments.
+EXECUTION_SCRIPT=$1
+ARGS=
+for ((i=2; i<=`expr $# - 7`; i++))
+do
+  eval ARG=\${$i}
+  ARGS="$ARGS $ARG"
+done
+eval SOURCE_DIR=\${`expr $# - 6`}
+eval INSTALL_DIR=\${`expr $# - 5`}
+eval MASTER_HOSTNAME=\${`expr $# - 4`}
+eval NUMBER_NODES=\${`expr $# - 3`}
+eval SLAVES_FILE=\${`expr $# - 2`}
+eval LOCALTMP_DIR=\${`expr $# - 1`}
+eval LOG_DIR=\${`expr $#`}
+
+echo "Installing Spark from $SOURCE_DIR to $INSTALL_DIR using master $MASTER_HOSTNAME and $NUMBER_NODES nodes from slaves file $SLAVES_FILE."
+echo "Using java version: "
+java -version
+
+# Copy the source files to the install directory.
+echo "Copying Spark packages."
+scp -r $SOURCE_DIR/spark/ $INSTALL_DIR
+mkdir -p $INSTALL_DIR/spark/logs
+
+# Create a file to set the environment variables.
+BIOSPARK_ENV_FILE=$INSTALL_DIR/biospark-env.sh
+echo "Creating environment variable file: $BIOSPARK_ENV_FILE"
+cat >$BIOSPARK_ENV_FILE <<EOF
+export PATH=$INSTALL_DIR/spark/bin:$INSTALL_DIR/spark/sbin:\$PATH
+export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=cpp
+EOF
+source $BIOSPARK_ENV_FILE
+
+# Modify the template files for Spark.
+echo "Customizing template files."
+cat $INSTALL_DIR/spark/conf/spark-defaults.conf.template | sed 's|TEMPLATE_TMP_DIR|'$LOCALTMP_DIR'|g'  > $INSTALL_DIR/spark/conf/spark-defaults.conf
+cat $INSTALL_DIR/spark/conf/spark-env.sh.template | sed 's|TEMPLATE_INSTALL_DIR|'$INSTALL_DIR'|g'  > $INSTALL_DIR/spark/conf/spark-env.sh
+
+# Create a slaves files without the master node.
+SLAVES_FILE_NO_MASTER=$SLAVES_FILE.nomaster
+tail -n +2 $SLAVES_FILE > $SLAVES_FILE_NO_MASTER
+
+# Start the Spark master.
+echo "Starting Spark master."
+spark-class org.apache.spark.deploy.master.Master > $INSTALL_DIR/spark/logs/master.log 2>&1 &
+echo "Sleeping."
+sleep 30
+
+# Start the Spark workers.
+echo "Starting Spark workers connecting to: spark://${MASTER_HOSTNAME}:7077"
+srun --nodes=$((NUMBER_NODES-1)) --ntasks=$((NUMBER_NODES-1)) --nodelist=$SLAVES_FILE_NO_MASTER --cpus-per-task=1 --output="$INSTALL_DIR/spark/logs/slave-%N.log" taskset -c 0-23 spark-class org.apache.spark.deploy.worker.Worker -c 24 spark://${MASTER_HOSTNAME}:7077 &
+echo "Sleeping."
+sleep 30
+
+# Make sure the cluster started up correctly.
+MASTER_RUNNING=1
+WORKERS_RUNNING=1
+echo "MASTER running: $MASTER_RUNNING"
+echo "WORKERS running: $WORKERS_RUNNING"
+
+if [ $MASTER_RUNNING -eq 1 ] && [ $WORKERS_RUNNING -eq 1 ]; then    
+    # Run the script.
+    echo "Spark startup successful."
+    $EXECUTION_SCRIPT $ARGS $INSTALL_DIR $MASTER_HOSTNAME $NUMBER_NODES $SLAVES_FILE $LOCALTMP_DIR $LOG_DIR
+else
+    echo "Spark cluster startup failed."
+fi
+
+# Stop the processes.
+echo "Stopping master and workers."
+jobs
+kill -INT $(jobs -p)
+echo "Sleeping 1."
+sleep 20
+jobs
+kill -KILL $(jobs -p)
+echo "Sleeping 2."
+sleep 10
+jobs
+
+# Remove any Spark cache files.
+echo "Removing Spark cache files from /tmp on all nodes."
+srun --nodes=$NUMBER_NODES --ntasks=$NUMBER_NODES --nodelist=$SLAVES_FILE --cpus-per-task=1 rm -rf $LOCALTMP_DIR
+
+# Remove or save the installation directory.
+if [ $MASTER_RUNNING -eq 1 ] && [ $WORKERS_RUNNING -eq 1 ]; then    
+    echo "Removing Spark packages from $INSTALL_DIR."
+    rm -rf $INSTALL_DIR
+    echo "Succeeded."
+else
+    echo "Preserving Spark packages from $INSTALL_DIR for error analysis."
+    mv $INSTALL_DIR $INSTALL_DIR-error
+    echo "Failed."
+fi
+

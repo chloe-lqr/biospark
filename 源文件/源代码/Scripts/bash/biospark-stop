@@ -1,0 +1,4 @@
+#!/bin/bash
+
+su spark -c stop-yarn.sh
+su spark -c stop-dfs.sh

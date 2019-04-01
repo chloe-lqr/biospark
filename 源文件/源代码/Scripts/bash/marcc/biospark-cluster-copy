@@ -1,0 +1,29 @@
+#!/bin/bash
+# This script copies a file to hdfs using each node.
+
+if [ -z "$6" ]; then
+  echo "Usage: $0 number_nodes slaves_file source_file tmp_dir hdfs_data_dir copies"
+  exit
+fi
+
+# Parse the arguments.
+NUMBER_NODES=$1
+SLAVES_FILE=$2
+SOURCE_FILE=$3
+TMP_DIR=$4
+TMP_FILE=$TMP_DIR/`basename $SOURCE_FILE`
+HDFS_DATA_DIR=$5
+COPIES=$6
+
+# Make the directory.
+hdfs dfs -mkdir -p $HDFS_DATA_DIR
+
+# Copy the file to each node.
+echo "Started broadcast of $SOURCE_FILE to $TMP_FILE: `date`"
+sbcast -s 10485760 $SOURCE_FILE $TMP_FILE
+echo "Finished broadcast of $SOURCE_FILE to $TMP_FILE: `date`"
+
+# Clear the cache of all hdfs files.
+echo "Started copying $TMP_FILE to $HDFS_DATA_DIR: `date`"
+srun --nodes=$NUMBER_NODES --ntasks=$NUMBER_NODES --nodelist=$SLAVES_FILE --cpus-per-task=1 biospark-cluster-copy-helper $TMP_FILE $HDFS_DATA_DIR $COPIES
+echo "Finished copying $TMP_FILE to $HDFS_DATA_DIR: `date`"

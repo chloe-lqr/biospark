@@ -1,0 +1,124 @@
+/*
+ * University of Illinois Open Source License
+ * Copyright 2011 Luthey-Schulten Group,
+ * All rights reserved.
+ * 
+ * Developed by: Luthey-Schulten Group
+ * 			     University of Illinois at Urbana-Champaign
+ * 			     http://www.scs.uiuc.edu/~schulten
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of
+ * this software and associated documentation files (the Software), to deal with 
+ * the Software without restriction, including without limitation the rights to 
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies 
+ * of the Software, and to permit persons to whom the Software is furnished to 
+ * do so, subject to the following conditions:
+ * 
+ * - Redistributions of source code must retain the above copyright notice, 
+ * this list of conditions and the following disclaimers.
+ * 
+ * - Redistributions in binary form must reproduce the above copyright notice, 
+ * this list of conditions and the following disclaimers in the documentation 
+ * and/or other materials provided with the distribution.
+ * 
+ * - Neither the names of the Luthey-Schulten Group, University of Illinois at
+ * Urbana-Champaign, nor the names of its contributors may be used to endorse or
+ * promote products derived from this Software without specific prior written
+ * permission.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR 
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL 
+ * THE CONTRIBUTORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR 
+ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, 
+ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR 
+ * OTHER DEALINGS WITH THE SOFTWARE.
+ *
+ * Author(s): Elijah Roberts, Max Klein
+ */
+ 
+package lm.io;
+
+import "lm/io/TilingHist.proto";
+
+message FFluxOutput {
+
+	enum Direction {
+        FORWARD		= 0;
+        BACKWARD 	= 1;
+    }
+    
+    enum Lifecycle {
+    	INITIAL		= 0;
+    	RUNNING		= 1;
+    	FINAL		= 2;
+    }
+
+	// holds a number of pairs of long, single column tables
+	// one row per trajectory
+	message TrajectoryOutput {
+		optional Direction direction	= 1 [default=FORWARD];
+		optional Lifecycle lifecycle	= 2 [default=INITIAL];
+		
+		repeated double count			= 101 [packed=true];
+		repeated uint64 edge_id			= 102 [packed=true];
+		repeated int32  species_count	= 103 [packed=true];
+		repeated double time			= 104 [packed=true];
+		repeated uint64 trajectory_id	= 105 [packed=true];
+	}
+	
+	message BasinOutput {
+		optional Direction direction 							= 1 [default=FORWARD];
+		
+		optional double flux_out_of_tile_zero					= 101;
+		
+		optional lm.io.TilingHist time_per_phase				= 200;
+		optional lm.io.TilingHist runs_per_phase				= 201;
+		
+		// given that a trajectory has reached tile i coming from this basin, this is the probability that the trajectory reaches tile i+1 before it falls back into the basin
+		// the first and last entries are both zeroed out
+		optional lm.io.TilingHist probability_i_to_i_plus_one 	= 102;
+		
+		// given that a trajectory has reached tile 1 coming from this basin, this is the probability of reaching tile i+1 without falling back into tile 0
+		// example: probability_i_plus_one(9) is the probability that a trajectory, having crossed into tile 1 coming from this basin, will reach tile 10
+		// the first and last entries are both zeroed out
+		optional lm.io.TilingHist probability_one_to_i_plus_one	= 103;
+		
+		optional double switching_rate_constant					= 104;
+		
+		// The ensemble average value of h, which for a single trajectory is equal to 1 if this basin was the last it visited and zero otherwise
+		// Equivalent to, I think, the probability of a trajectory randomly selected from an ensemble having been in this particular more recently than all others
+		// For a symmetric 2-state system like the Genetic Toggle this should be very close to .5
+		optional double this_basin_last_visited_probability		= 105;
+		
+		// the h-dependent (i.e. last basin visited dependent) probability of being in tile i
+		optional lm.io.TilingHist probability_i				= 106;
+		// the normalized version of the above probability distribution
+		optional lm.io.TilingHist normalized_probability_i  = 107;
+		// the weight factor used to calculate normalized_probability_i
+		optional double probability_i_weight				= 108;
+	}
+	
+	message FinalOutput {
+		// the h-independent (i.e. last basin visited independent) probability of being in tile i
+		// like all of the other probability distributions in FFluxOuput, explicitly does not account for the probability of being in the half-bounded tiles 0 and number_tiles-1 that correspond to the actual basins 
+		// thus, the entries for tiles 0 and number_tiles-1 are zeroed out
+		// the lack of basin tile probabilities could be approximately corrected by grafting on the basin tile probabilities as found during a brute force sampling simulation (Valeriani, 2007)
+		optional lm.io.TilingHist probability_i				= 1;
+		// the normalized version of the above probability distribution
+		optional lm.io.TilingHist normalized_probability_i  = 2;
+		// the weight factor used to calculate normalized_probability_i
+		optional double probability_i_weight				= 3;
+		// the switching rate constants for all of the basins
+		repeated double switching_rate_constants			= 101 [packed=true];
+	}
+	
+	optional int32 number_species					= 1 [default=0];
+	// for a 1D tiling, this is going to be tiling->edges_size() + 1
+	optional uint64 number_tiles	 				= 2 [default=0];
+    optional uint32 tiling_id      					= 3 [default=0];
+    
+    repeated TrajectoryOutput trajectory_outputs 	= 101;
+    repeated BasinOutput basin_outputs				= 102;
+    optional FinalOutput final_output				= 103;
+}

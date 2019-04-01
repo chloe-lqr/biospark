@@ -1,0 +1,119 @@
+#!/bin/bash
+# This script starts a Spark instance on the slurm queue.
+# -z : is true if the length of "$7" is 0.
+if [ -z "$7" ]; then
+  echo "Usage: $0 biospark_script arguments* log_file queue number_nodes number_cores_per_node email_address wall_time"
+  echo "    where        wall_time          the max run time as HH:MM:SS"
+  exit
+fi
+
+# Settings.
+LOCALTMP_DIR_PREFIX=/tmp
+
+# Parse the arguments.
+BIOSPARK_SCRIPT=$1
+ARGS=
+for ((i=2; i<=`expr $# - 6`; i++))
+do
+  eval ARG=\${$i}
+  ARGS="$ARGS $ARG"
+done
+eval LOGFILE=\${`expr $# - 5`}
+eval QUEUE=\${`expr $# - 4`}
+eval NODES=\${`expr $# - 3`}
+eval CORES=\${`expr $# - 2`}
+eval EMAIL=\${`expr $# - 1`}
+eval WALLTIME=\${`expr $#`}
+WORKDIR=`pwd`
+LOGFILE=$WORKDIR/$LOGFILE
+
+if [ $NODES -lt 2 ]; then
+  echo "Error: must run on at least two nodes."
+  exit
+fi
+
+# Create the job file.
+JOBFILE=`mktemp /tmp/biospark.XXXXXXXXXXXX`
+cat >$JOBFILE <<EOF
+#!/bin/bash -l
+#SBATCH
+#SBATCH --partition=$QUEUE
+#SBATCH --job-name=biospark
+#SBATCH --time=$WALLTIME
+#SBATCH --nodes=$NODES
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=$CORES
+#SBATCH --mail-type=end
+#SBATCH --mail-user=$EMAIL
+#SBATCH --export=ALL
+#SBATCH --workdir=$WORKDIR
+#SBATCH --exclusive
+#SBATCH --output=$LOGFILE
+
+# Change directories to the directory where the qsub command was issued.
+echo "Running in \$SLURM_SUBMIT_DIR"
+cd \$SLURM_SUBMIT_DIR
+
+# Create a tmp dir for the job.
+LOCALTMP_DIR=$LOCALTMP_DIR_PREFIX/\$SLURM_JOBID
+mkdir -p \$LOCALTMP_DIR
+
+# Print out the machines allocated to the job.
+echo "Job: \$SLURM_JOBID"
+echo "Submit Host: \$SLURM_SUBMIT_HOST"
+echo "Tmp: \$LOCALTMP_DIR"
+echo "Nodes: \$SLURM_JOB_NODELIST"
+echo "CPUs: \$SLURM_CPUS_ON_NODE"
+
+# Figure out the master node.
+MASTER_HOSTNAME=\`hostname\`
+
+# Create the slaves node list.
+SLAVES_FILE=\$LOCALTMP_DIR/slaves
+scontrol show hostname \$SLURM_JOB_NODELIST > \$SLAVES_FILE 
+NUMBER_NODES=\`cat \$SLAVES_FILE|wc -l\`
+echo "Using nodes:"
+cat \$SLAVES_FILE
+
+# Create a slaves files without the master node.
+SLAVES_FILE_NO_MASTER=\$SLAVES_FILE.nomaster
+tail -n +2 \$SLAVES_FILE > \$SLAVES_FILE_NO_MASTER
+
+# Start the Spark master.
+echo "Starting Spark master."
+spark-class org.apache.spark.deploy.master.Master > $LOGFILE.master 2>&1 &
+echo "Pausing for master to start."
+sleep 30
+
+# Start the Spark workers.
+echo "Starting Spark workers connecting to: spark://\${MASTER_HOSTNAME}:7077"
+srun --quit-on-interrupt --nodes=\$((NUMBER_NODES-1)) --ntasks=\$((NUMBER_NODES-1)) --nodelist=\$SLAVES_FILE_NO_MASTER --cpus-per-task=1 --output="$LOGFILE.slave-%N.log" taskset -c 0-$((CORES-1)) spark-class org.apache.spark.deploy.worker.Worker -c $CORES spark://\${MASTER_HOSTNAME}:7077 &
+echo "Pausing for workers to start."
+sleep 30
+
+# Run the job.
+biospark-submit -m spark://\${MASTER_HOSTNAME}:7077 -p client -d 16g -e $((4*CORES))g -n \$((NUMBER_NODES-1)) -c $CORES $BIOSPARK_SCRIPT $ARGS >> $LOGFILE 2>&1
+
+# Stop the processes.
+echo "Interrupting master and workers."
+echo \$(jobs -p) | xargs -n1 kill -INT
+echo "Pausing for master and workers to stop."
+sleep 20
+jobs
+
+echo "Stopping master and workers."
+echo \$(jobs -p) | xargs -n1 kill -KILL
+echo "Pausing for master and workers to stop."
+sleep 20
+jobs
+
+# Remove the temp dir.
+echo "Removing Tmp: \$LOCALTMP_DIR"
+rm -rf \$LOCALTMP_DIR
+
+echo "Finished."
+
+EOF
+
+echo "Submitting Biospark job to $QUEUE"
+sbatch $JOBFILE && rm -f $JOBFILE

@@ -1,0 +1,24 @@
+#!/bin/bash
+# This script copies a file to hdfs using each node.
+
+if [ -z "$3" ]; then
+  echo "Usage: $0 source_file hdfs_dir copies"
+  exit
+fi
+
+# Parse the arguments.
+SOURCE_FILE=$1
+HDFS_DIR=$2
+COPIES=$3
+
+# Make a larger version of the file by concatenating multiple copies.
+CONCAT_FILE=$SOURCE_FILE.concat
+touch $CONCAT_FILE
+for i in `seq -f "%g" 0 $COPIES`; do
+    cat $SOURCE_FILE >> $CONCAT_FILE
+done;
+rm $SOURCE_FILE
+
+# Put the file into hdfs.
+hdfs dfs -put $CONCAT_FILE $HDFS_DIR/`hostname`
+

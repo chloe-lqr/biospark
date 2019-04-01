@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package lm.io;
+
+message Methylation {
+    string rname                             = 1;
+    int32 pos                                  = 2;
+    string cigar                             = 3;
+    string xm                                = 4;
+    string xr                                = 5;
+    string xg                                = 6;
+}

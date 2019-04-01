@@ -1,0 +1,24 @@
+############################
+#library specific options
+############################
+
+# Sets the prefix dir for installation of lm (i.e. running "make install").
+IF(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+    SET(CMAKE_INSTALL_PREFIX "/usr/local")
+ENDIF(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+
+# Enable integrated HDFS support.
+IF(NOT DEFINED BUILD_WITH_HDFS)
+    SET(BUILD_WITH_HDFS true)
+ENDIF(NOT DEFINED BUILD_WITH_HDFS)
+IF(NOT DEFINED HADOOP_ROOT)
+    SET(HADOOP_ROOT "/usr/local/lib/hadoop")
+ENDIF(NOT DEFINED HADOOP_ROOT)
+IF(NOT DEFINED JAVA_LIB_DIR)
+    SET(JAVA_LIB_DIR "/usr/lib/jvm/current/jre/lib/amd64/server")
+ENDIF(NOT DEFINED JAVA_LIB_DIR)
+
+
+# Old settings for OS X.
+#SET(JAVA_LIB_DIR "/Library/Java/JavaVirtualMachines/jdk1.8.0_45.jdk/Contents/Home/jre/lib/libjava.dylib")
+#SET(JAVA_LIB_DIR "/System/Library/Frameworks/JavaVM.framework/Versions/A/JavaVM")

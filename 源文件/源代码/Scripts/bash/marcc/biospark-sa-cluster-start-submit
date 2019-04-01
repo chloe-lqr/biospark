@@ -1,0 +1,95 @@
+#!/bin/bash
+# This script starts a Hadoop and Spark instance on marcc.
+# MARCC: The Maryland Advanced Research Computing Center
+# This script calls "biospark-sa-cluster-start".
+# The differences between this script and "biospark-cluster-start-submit" are: 1.INSTALL_DIR_PREFIX is xxx/spark-tmp, the other is xxx/hadoop-tmp; 2.Don't need the argument: EXECUTORS_PER_NODE.
+ 
+
+if [ -z "$6" ]; then
+  echo "Usage: $0 execution_script arguments* log_file queue number_cores email_address wall_time"
+  echo "    where        wall_time          the max run time as HH:MM:SS"
+  exit
+fi
+
+
+# Parse the arguments.
+SOURCE_DIR=/home-2/erober32@jhu.edu/share/apps/lib
+INSTALL_DIR_PREFIX=/home-2/erober32@jhu.edu/share/spark-tmp
+LOCALTMP_DIR_PREFIX=/tmp
+EXECUTION_SCRIPT=$1
+ARGS=
+for ((i=2; i<=`expr $# - 5`; i++))
+do
+  eval ARG=\${$i}
+  ARGS="$ARGS $ARG"
+done
+eval LOGFILE=\${`expr $# - 4`}
+eval QUEUE=\${`expr $# - 3`}
+eval CORES=\${`expr $# - 2`}
+eval EMAIL=\${`expr $# - 1`}
+eval WALLTIME=\${`expr $#`}
+LOG_DIR=`dirname $LOGFILE`
+WORKDIR=`pwd`
+LOGFILE=$WORKDIR/$LOGFILE
+
+if [ $((CORES%24)) -ne 0 ]; then
+  echo "Error: number_cores must be a multiple of 24."
+  exit
+fi
+NODES=$((CORES/24))
+if [ $NODES -lt 2 ]; then
+  echo "Error: must run on at least two nodes."
+  exit
+fi
+
+# Create the job file.
+JOBFILE=`mktemp /tmp/biospark.XXXXXXXXXXXX`
+cat >$JOBFILE <<EOF
+#!/bin/bash -l
+#SBATCH
+#SBATCH --partition=$QUEUE
+#SBATCH --job-name=biospark
+#SBATCH --time=$WALLTIME
+#SBATCH --nodes=$NODES
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=24
+#SBATCH --mail-type=end
+#SBATCH --mail-user=$EMAIL
+#SBATCH --export=ALL
+#SBATCH --workdir=$WORKDIR
+#SBATCH --exclusive
+#SBATCH --output=$LOGFILE
+
+# Change directories to the directory where the qsub command was issued.
+echo "Running in \$SLURM_SUBMIT_DIR"
+cd \$SLURM_SUBMIT_DIR
+
+# Print out the machines allocated to the job.
+echo "Job: \$SLURM_JOBID"
+echo "Submit Host: \$SLURM_SUBMIT_HOST"
+echo "Nodes: \$SLURM_JOB_NODELIST"
+echo "CPUs: \$SLURM_CPUS_ON_NODE"
+
+# Figure out the installation directory.
+INSTALL_DIR=$INSTALL_DIR_PREFIX/\$SLURM_JOBID
+mkdir -p \$INSTALL_DIR
+LOCALTMP_DIR=$LOCALTMP_DIR_PREFIX/\$SLURM_JOBID
+
+# Figure out the master node.
+MASTER_HOSTNAME=\`hostname\`
+
+# Create the slaves node list.
+SLAVES_FILE=\$INSTALL_DIR/slaves
+scontrol show hostname \$SLURM_JOB_NODELIST > \$SLAVES_FILE 
+NUMBER_NODES=\`cat \$SLAVES_FILE|wc -l\`
+echo "Using nodes:"
+cat \$SLAVES_FILE
+
+# Run the job.
+biospark-sa-cluster-start $EXECUTION_SCRIPT $ARGS $SOURCE_DIR \$INSTALL_DIR \$MASTER_HOSTNAME \$NUMBER_NODES \$SLAVES_FILE \$LOCALTMP_DIR $LOG_DIR
+
+EOF
+
+echo "Submitting job to $QUEUE (cores=$CORES)"
+sbatch --dependency=singleton $JOBFILE && rm -f $JOBFILE
+

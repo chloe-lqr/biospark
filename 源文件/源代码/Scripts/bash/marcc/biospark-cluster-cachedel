@@ -1,0 +1,19 @@
+#!/bin/bash
+# This script frees the cache for all of the hdfs files.
+
+if [ -z "$3" ]; then
+  echo "Usage: $0 number_nodes slaves_file hdfs_dir"
+  exit
+fi
+
+# Parse the arguments.
+NUMBER_NODES=$1
+SLAVES_FILE=$2
+HDFS_DIR=$3
+
+# Clear the cache of all hdfs files.
+echo "Clearing hdfs cache."
+#mpiexec -n $NUMBER_NODES -f $SLAVES_FILE find $HDFS_DIR/datanode -type f -exec cachestats {} \;
+srun --nodes=$NUMBER_NODES --ntasks=$NUMBER_NODES --nodelist=$SLAVES_FILE --cpus-per-task=1 find $HDFS_DIR/datanode -type f -exec cachedel {} \;
+#mpiexec -n $NUMBER_NODES -f $SLAVES_FILE find $HDFS_DIR/datanode -type f -exec cachestats {} \;
+echo "Finished clearing hdfs cache."

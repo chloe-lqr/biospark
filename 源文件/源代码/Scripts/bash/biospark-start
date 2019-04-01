@@ -1,0 +1,4 @@
+#!/bin/bash
+
+su spark -c start-dfs.sh
+su spark -c start-yarn.sh

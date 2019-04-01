@@ -1,0 +1,200 @@
+#!/usr/bin/env python
+from argparse import ArgumentParser
+import numpy as np
+import os
+import re
+
+import mdtraj as md
+from robertslab.helper.parseHelper import ConversionFuncs
+# robertslab : Code/Python/robertslab
+
+try:
+    import argcomplete
+    doComplete = True
+except ImportError:
+    doComplete = False
+
+from robertslab.md.helper.evalHelper import eval_expr
+from robertslab.md.mdIO.sfileMD import SFileMD
+
+__all__ = ['TrajIter', 'TrajectoryToSFile']
+
+class TrajIter(object):
+    """
+    class to handle selecting atoms and opening a trajectory as an iterator
+    """
+
+    def __init__(self, trajectoryPath, structurePath, chunk=100, selection=None, topTraj=None):
+
+        # basic attr init
+        self.trajectoryPath = trajectoryPath
+        self.structurePath = structurePath
+        self.topTraj = topTraj
+
+        self.chunk = chunk
+        self.selection = selection
+
+        # init an attr to keep track of how much we've 'shrunk' the trajectory via slicing
+        self.nAtomRatio = None
+        hExcluder = 'not type H'
+
+        # init the topology via first loading only the topology file
+        self.initTopology()
+
+        # init the trajIter
+        self.initTrajectoryIter()
+
+    def __iter__(self):
+        return self.trajIter.__iter__()
+
+    def initAtomIndices(self):
+        """
+        set .atomIndices to a selected subset of the trajectory's atoms if required, otherwise set it to None
+        """
+        self.atomIndices = None if self.selection is None else self.top.select(self.selection)
+
+    def initTopology(self):
+        """
+        init the topology object separately from the main trajectory, to assist with atom selections
+        """
+        if isinstance(self.structurePath, str):
+            self.topTraj = md.load(self.structurePath)
+            self.top = self.topTraj.top
+        else:
+            self.top = self.topPath
+
+        # make sure that topTraj is sliced correctly so that it can be used for an alignment
+        if self.selection is not None:
+            old_n_atoms = float(self.topTraj.n_atoms)
+            self.topTraj.atom_slice(self.topTraj.top.select(self.selection), inplace=True)
+            self.nAtomRatio = self.topTraj.n_atoms/old_n_atoms
+
+    def initTrajectoryIter(self):
+        """
+        init the md trajectory iterator
+        """
+        self.initAtomIndices()
+        self.trajIter = md.iterload(self.trajectoryPath, top=self.top, chunk=self.chunk, atom_indices=self.atomIndices)
+
+class TrajectoryToSFile(object):
+
+    def __init__(self, trajectory_file, structure_file, align=False, blockSize=None, chunk=200, repeats=1, selection=None, sfileExt=".sfile", outputFile=None, sfileSuffix=None, totalBytes=None):
+
+        # init attrs from args
+        self.trajectoryPath = trajectory_file
+        self.structurePath = structure_file
+        self.align = align
+        self.blockSize = blockSize
+        self.chunk = chunk
+        self.selection = selection
+        self.totalBytes = totalBytes
+        self.repeats = repeats
+
+        # init the SFileMD and store some metadata
+        if outputFile is None:
+            outputFile = '.'.join(self.trajectoryPath.split('.')[:-1])+sfileExt
+        # TODO, implement extension and suffix.
+
+        # If the output filename is an HDFS url, extract the filename and mark the target as hdfs.
+        writeTarget = None
+        m = re.match("hdfs://([^/]+)(/.+)", outputFile)
+        if m is not None:
+            hostname = m.group(1)
+            outputFile = m.group(2)
+            if hostname != "local":
+                raise ValueError("%s was not valid a valid HDFS host; HDFS output is currently limited to the local HDFS using the hostname \"local\""%(hostname))
+            writeTarget = "hdfs"
+            print "Using hdfs %s"%outputFile
+
+        self.sfileMD = SFileMD(outputFile, blockSize=self.blockSize, totalBytes=self.totalBytes, writeTarget=writeTarget)
+        self.sfileMD.open()
+
+    # @cProfileDecorator
+    def performConversion(self):
+        """
+        open the trajectory file and perform the conversion to SFile
+        """
+        self.sfileMD.initStartTime()
+        self.initTrajIter()
+        self.initRepeats()
+        # # if we've sliced the trajectory, correct the progrss bar in .sfileMD to account for the smaller output size
+        # if self.trajIter.nAtomRatio is not None:
+        #     self.sfileMD.totalBytes*=self.trajIter.nAtomRatio
+        for trajChunk in self.trajIter:
+            self.traj = trajChunk
+            if self.align:
+                self.traj.superpose(self.trajIter.topTraj)  #,parallel=False) #atom_indices=np.arange(self.traj.n_atoms), ref_atom_indices=self.trajIter.atomIndices,
+            self.genFrames()
+            if self.writeToSFile():
+                break
+        self.sfileMD.close()
+        self.sfileMD.showProgressDone()
+
+    def initRepeats(self):
+        # if we've sliced the trajectory, and if we have a target output size (ie .totalBytes), correct the repeats to account for the smaller output size
+        sliceCorrection = self.trajIter.nAtomRatio if self.trajIter.nAtomRatio is not None else 1
+        if self.totalBytes is not None:
+            self.repeats = int((self.totalBytes/float(sliceCorrection))/os.stat(self.trajPath).st_size) + 1
+            self.sfileMD.totalBytes = self.totalBytes
+            self.sfileMD.limitToTotalBytes = True
+        else:
+            self.sfileMD.totalBytes = os.stat(self.trajectoryPath).st_size*sliceCorrection*self.repeats
+            self.sfileMD.limitToTotalBytes = False
+
+    def initTrajIter(self):
+        # init the TrajIter object
+        self.trajIter = TrajIter(trajectoryPath=self.trajectoryPath, structurePath=self.structurePath, chunk=self.chunk, selection=self.selection)
+
+    def genFrames(self):
+        '''
+        get 1 unit deep 3D slices of self.traj.xyz
+        '''
+        for frameXYZ in (self.traj.xyz[np.s_[i:j,:,:]] for i,j in zip(range(self.traj.xyz.shape[0]), range(1, self.traj.xyz.shape[0] + 1))):
+            frameXYZ.shape = (frameXYZ.shape[1],frameXYZ.shape[2])
+            self.sfileMD.addFrame(frameXYZ)
+
+    def writeToSFile(self):
+        """
+        write data loaded into .sfileMD out to an on-disk SFile
+        """
+        totalBytesReached = False
+        for i in range(self.repeats):
+            if self.sfileMD.writeFrames(handleFile=False):
+                totalBytesReached = True
+                break
+        self.sfileMD.clearFrames()
+        return totalBytesReached
+
+def Main():
+    SelectionConversion = ConversionFuncs.delimiterSubClosure('_', ' ')
+
+    parser = ArgumentParser('A utility to convert an MD trajectory file (e.g., .dcd) to an SFile')
+    parser.add_argument('trajectory_file',                                               help='Path to a molecular dynamics trajectory file. The file must be in a format readable by the mdtraj package.')
+    parser.add_argument('structure_file',                                                help='Path to a structure file (e.g., .pdb) that corresponds to the trajectory file. The file must be in a format readable by the mdtraj package.')
+    parser.add_argument('-o', '--output-file', dest='outputFile',                        help='Path to the output file. If specified as a URL of type hdfs://hostname/path/file the file will be created directly in HDFS. Specify the hostname as "local" to use the default HDFS for the local host. If left unspecified, the filename is generated from trajectory_path. If set to "stdout", write output to stdout instead of a file.')
+    parser.add_argument('-a', '--align', action='store_true', dest='align',              help='If this flag is set, the trajectory is aligned to the structure before it is converted.')
+    parser.add_argument('-c', '--chunk', dest='chunk',                                   help='Size of trajectory chunk to read in at a time, in number of frames.')
+    parser.add_argument('-r', '--repeats', dest='repeats',                               help='Number of times to loop over the trajectory in the output.')
+    parser.add_argument('-s', '--selection', dest='selection', type=SelectionConversion, help='Atoms to include in output, specified via the mdtraj atom selection syntax.')
+    parser.add_argument('-b', '--block-size', dest='blockSize',                                 help='If the output is located in HDFS, this will set the dfs.block.size for the converted trajectory file.')
+    parser.add_argument('--sfileExt', dest='sfileExt',                                   help='Extension to use for output file, if sfilePath is left unspecified (default: .sfile).')
+    parser.add_argument('--sfileSuffix', dest='sfileSuffix',                             help='An optional suffix (placed just before the file extension) for the output file name.')
+    parser.add_argument('--totalBytes', dest='totalBytes',                               help='If set, the script will loop through the input trajectory until (approximately) this many bytes have been written out. Takes precedence over -r.')
+
+    if doComplete:
+        argcomplete.autocomplete(parser)
+
+    argNamespace = parser.parse_args()
+    ttsOpts = {key:val for key,val in argNamespace._get_kwargs() if val is not None}
+
+    # evaluation (by a limited version of eval) lets us do things like using exponents in cmd line args
+    for key in ['blockSize', 'chunk', 'repeats', 'totalBytes']:
+        if key in ttsOpts:
+            ttsOpts[key] = int(eval_expr(ttsOpts[key]))
+
+    print 'running trajectoryToSFile with args: %s' % sorted(list(ttsOpts.items()))
+    trajectoryToSFile = TrajectoryToSFile(**ttsOpts)
+    trajectoryToSFile.performConversion()
+
+if __name__=='__main__':
+    Main()

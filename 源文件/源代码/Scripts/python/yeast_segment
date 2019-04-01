@@ -1,0 +1,328 @@
+#!/usr/bin/python
+
+from __future__ import division
+import copy
+import math
+import pickle
+import re
+import sys
+import time
+import uuid
+import cStringIO
+import zlib
+
+
+
+import matplotlib.pyplot as plt
+import scipy.optimize as opt
+from skimage import io
+from robertslab.sfile import *
+import robertslab.imaging.bead as imbeads
+import robertslab.imaging.imaging as imaging
+import robertslab.imaging.yeast.contour as contour
+import robertslab.imaging.yeast.segment as segment
+import robertslab.imaging.yeast.kvarn_contour as kvarn
+
+# Some global variables.
+refBgMean=0.0
+refBgStd=0.0
+
+validateOptions={}
+validateOptions["area"] = (250.0,5600.0)
+validateOptions["interiorIntensity"] = (0.27,0.5,0.33)
+validateOptions["borderIntensity"] = (0.2,0.5,0.33)
+validateOptions["interiorBorderIntensityRatio"] = (0.94,1.5)
+validateOptions["radius"] = (5.0,45.0,0.19)
+validateOptions["gradientEnergy"] = (-0.2,-0.02,1.0)
+
+beadValidateOptions={}
+beadValidateOptions["interiorIntensity"] = (0.6,1.0,0.50)
+beadValidateOptions["radialSymmetry"] = (0.15,)
+
+
+def printUsage():
+    print "Usage: image_sfile"
+    print "Usage: replay cell_dictionary starting_frame width height [options]"
+    print "Usage: resegment cell_dictionary starting_frame cell_id [options]"
+
+def main():
+
+    global refBgMean,refBgStd
+
+    # Make sure we have the correct command line arguments.
+    if len(sys.argv) < 2:
+        printUsage()
+        quit()
+
+    # Check for any options.
+    contourPoints=50
+    tolerance=1e-2
+    for arg in sys.argv:
+        if arg.startswith("--contour-points="):
+            m=re.search("--contour-points=(\d+)",arg)
+            if m is not None:
+                contourPoints=int(m.group(1))
+            else:
+                print "Invalid option: %s"%arg
+                quit()
+        elif arg.startswith("--tolerance="):
+            m=re.search("--tolerance=([-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?)",arg)
+            if m is not None:
+                tolerance=float(m.group(1))
+            else:
+                print "Invalid option: %s"%arg
+                quit()
+
+    # See if we are executing a subfunction.
+    if sys.argv[1] == "replay":
+        if len(sys.argv) < 6:
+            printUsage()
+            quit()
+        replaySegmentation(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5]))
+        quit()
+    elif sys.argv[1] == "resegment":
+        if len(sys.argv) < 5:
+            printUsage()
+            quit()
+        redoSegmentation(sys.argv[2], int(sys.argv[3]), sys.argv[4], tolerance)
+        quit()
+
+    # Load the image.
+    im=io.imread(sys.argv[1])
+
+    # Calculate the background statistics.
+    (refBgMean,refBgStd)=imaging.calculateBackgroundStats(im, showIntermediates=False)
+
+    # Calculate the gradient of the image.
+    (G,Gthresh,Gtheta)=segment.calculateGradient(im, cutoff=0.15, showIntermediates=False)
+
+    # Find the bead.
+    beads=imbeads.findBeads(im, G, Gthresh, Gtheta, beadValidateOptions, showIntermediates=False)
+    print "Found %d bead(s)"%(len(beads))
+
+    # Loop until we have found all of the cells.
+    allCells=[]
+    while True:
+
+        # Create an exclusion mask for the bead and any cells found so far.
+        exclusionMask = np.zeros(im.shape, dtype=bool)
+        for bead in beads:
+            bead.fillImageMask(exclusionMask, 5.0)
+        for cell in allCells:
+            cell.fillImageMask(exclusionMask, 5.0)
+
+        # Find any cells outside the masked area.
+        cells=findCells(im, G, Gthresh, Gtheta, exclusionMask=exclusionMask, showIntermediates=False)
+        if len(cells) == 0:
+            break
+        allCells.extend(cells)
+
+    # Optimize all of the cells for interactions.
+    allCells=contour.refineCellInteractions(allCells, showIntermediates=False)
+
+    # Show the image with the cells highlighted.
+    plt.figure()
+    plt.subplot(1,1,1)
+    io.imshow(im)
+    plt.scatter(bead.xc,bead.yc,marker='x',color='b')
+    plt.gcf().gca().add_artist(plt.Circle((bead.xc,bead.yc),bead.r,color='b',fill=False))
+    nextCellNumber=1
+    cellIdMap={}
+    for cell in allCells:
+
+        # Map cell ids to numbers.
+        if cell.id not in cellIdMap:
+            cellIdMap[cell.id] = nextCellNumber
+            print "New cell map: %s -> %d"%(cell.id,nextCellNumber)
+            nextCellNumber += 1
+
+        plt.scatter(cell.xc+cell.Ix0,cell.yc+cell.Iy0,color='g',marker='x')
+        plt.plot(cell.xs+cell.Ix0,cell.ys+cell.Iy0,color='g')
+        plt.text(cell.bounds[2]+cell.Ix0, cell.bounds[3]+cell.Iy0, "%d"%(cellIdMap[cell.id]), va="top")
+
+    plt.axis([0,im.shape[1],im.shape[0],0])
+    io.show()
+
+
+def findCells(I, G, Gthresh, Gtheta, exclusionMask=None, showIntermediates=False):
+    
+    global refBgMean
+
+    # Calculate the Hough transform.
+    (hough,houghThresh)=segment.calculateHoughTransform(G, Gthresh, Gtheta, 50, direction=0, exclusionMask=exclusionMask, showIntermediates=showIntermediates)
+
+    # Estimate the cluster centers from the Hough transform.
+    centers=segment.estimateCenters(hough, houghThresh, exclusionMask=exclusionMask, showIntermediates=showIntermediates)
+    print "Found %d possible cells"%(len(centers))
+
+    cells=[]
+    for i,(xc,yc,r) in enumerate(centers):
+
+        print "Checking possible cell %d"%(i)
+
+        # Extract the cell image into a separate buffer.
+        imCell = imaging.extractImageRegion(I, int(xc)-300, int(yc)-300, int(xc)+300, int(yc)+300, int(refBgMean))
+
+        # Find an initial guess for the contour using the Kvarnstrom contour extraction.
+        cell=kvarn.findCellContour(imCell, int(xc)-300, int(yc)-300, 300, 300, 100.0, M=50, showIntermediates=showIntermediates)
+
+        # Check the cell.
+        if not contour.validateCellContour(cell, showIntermediates=showIntermediates, **validateOptions): continue
+
+        # Refine the initial guess for the contour using the complete cell model.
+        cell=contour.refineCellContour(cell, tolerance=1e-1, showIntermediates=showIntermediates)
+
+        # Check the cell.
+        if not contour.validateCellContour(cell, showIntermediates=showIntermediates, **validateOptions): continue
+
+        # Generate a new id for the cell.
+        cell.id = uuid.uuid4().hex
+
+        # Add this cell to the list.
+        cells.append(cell)
+        print "Valid."
+
+    print "Found %d valid cells"%(len(cells))
+
+    return cells
+
+def replaySegmentation(lineageFilename, startingFrame, width, height):
+
+    # Load the cell lineage.
+    f=open(lineageFilename,"rb")
+    lineage = pickle.load(f)
+    f.close()
+
+    # Get a list of all the frames.
+    frames = lineage.keys()
+    frames.sort()
+
+    width += 600
+    height += 600
+
+    # Loop through the frames and cells.
+    nextCellNumber=1
+    cellIdMap={}
+    originalCellMap={}
+    I=np.zeros((height,width), dtype=np.uint8)
+    for frame in frames:
+        if frame >= startingFrame:
+            for cell in lineage[frame]:
+
+                # Map cell ids to numbers.
+                if cell.id not in cellIdMap:
+                    cellIdMap[cell.id] = nextCellNumber
+                    print "New cell: %s -> %d"%(cell.id,nextCellNumber)
+                    nextCellNumber += 1
+
+                # Save the first cell with this id.
+                if cell.id not in originalCellMap:
+                    originalCellMap[cell.id] = cell
+
+                # Add the cell's image to the full figure.
+                I[cell.Iy0+300:cell.Iy0+cell.I.shape[0]+300,cell.Ix0+300:cell.Ix0+cell.I.shape[1]+300] = cell.I
+
+            # Add the image to the plot.
+            plt.figure()
+            plt.imshow(I, cmap="gray", interpolation="nearest")
+            plt.title("frame %d"%(frame))
+
+            # Draw the cells.
+            for cell in lineage[frame]:
+                ocell = originalCellMap[cell.id]
+                plt.scatter(ocell.xc+ocell.Ix0+300,ocell.yc+ocell.Iy0+300,color='b',marker='x')
+                plt.plot(ocell.xs+ocell.Ix0+300,ocell.ys+ocell.Iy0+300,color='b')
+                plt.scatter(cell.xc+cell.Ix0+300,cell.yc+cell.Iy0+300,color='g',marker='x')
+                plt.plot(cell.xs+cell.Ix0+300,cell.ys+cell.Iy0+300,color='g')
+                plt.text(cell.bounds[2]+cell.Ix0+300, cell.bounds[3]+cell.Iy0+300, "%s"%(cell.id[:3]), va="top")
+
+            # Show the figure.
+            plt.axis([300,width-600,height-600,300])
+            plt.show()
+
+def redoSegmentation(lineageFilename, startingFrame, cellId, tolerance):
+
+    # Load the cell lineage.
+    f=open(lineageFilename,"rb")
+    lineage = pickle.load(f)
+    f.close()
+
+    # Get a list of all the frames.
+    frames = lineage.keys()
+    frames.sort()
+
+    # Skip to the starting frame.
+    i=0
+    while frames[i] < startingFrame and i < len(frames)-1:
+        i += 1
+
+    # Get the initial cell.
+    startingCell = getCellById(lineage[frames[i]], cellId)
+
+    # Show the starting cell.
+    print "Starting with frame %d, cell %s"%(frames[i],cellId)
+    plt.figure()
+    io.imshow(startingCell.I)
+    plt.scatter(startingCell.xc,startingCell.yc,color='g',marker='x')
+    plt.plot(startingCell.xs,startingCell.ys,color='g')
+    plt.axis([startingCell.bounds[0]-10,startingCell.bounds[2]+10,startingCell.bounds[3]+10,startingCell.bounds[1]-10])
+    io.show()
+
+    previousCell = startingCell
+    for i in range(i+1, len(frames)):
+
+        print "Resegmenting frame %d, cell %s"%(frames[i],cellId)
+
+        # Make a copy of the previous cell to start from.
+        newCell=copy.deepcopy(previousCell)
+
+        # Set the image for the new cell to be the current cell's image.
+        originalCell = getCellById(lineage[frames[i]], cellId)
+        newCell.I = originalCell.I.copy()
+
+        # Refine the new cell.
+        newCell=contour.refineCellContour(newCell, neighboringCells=lineage[frames[i-1]], tolerance=tolerance, showIntermediates=True)
+
+        contour.validateCellContour(newCell, showIntermediates=True, **validateOptions)
+
+        # Optimize with any interacting cells.
+        border=10.0; k_radial=1.0; k_boundary=0.10; k_image=15.0; k_interact_repulse=0.5; k_interact_attract=0.05
+        for possiblyInteractingCell in lineage[frames[i-1]]:
+                if newCell.id != possiblyInteractingCell.id and contour.CellContour.doCellsOverlap(newCell, possiblyInteractingCell, border=border):
+                    print "Optimzing interactions between %s and %s"%(newCell.id,possiblyInteractingCell.id)
+                    (c1,c2)=contour.optimizeYeastInteractionsModel([newCell,possiblyInteractingCell], 100.0, border, k_radial,k_boundary,k_image,k_interact_repulse, k_interact_attract, tolerance, showIntermediates=True)
+                    newCell = c1
+
+
+        previousCell = newCell
+
+
+        # Show the starting cell.
+        plt.figure()
+        plt.imshow(newCell.I, cmap="gray", interpolation="nearest")
+        plt.scatter(startingCell.xc,startingCell.yc,color='g',marker='x')
+        plt.plot(startingCell.xs,startingCell.ys,color='g')
+        plt.scatter(originalCell.xc,originalCell.yc,color='r',marker='x')
+        plt.plot(originalCell.xs,originalCell.ys,color='r')
+        plt.scatter(newCell.xc,newCell.yc,color='b',marker='x')
+        plt.plot(newCell.xs,newCell.ys,color='b')
+        plt.axis([newCell.bounds[0]-10,newCell.bounds[2]+10,newCell.bounds[3]+10,newCell.bounds[1]-10])
+        io.show()
+
+def getCellById(cells, cellId):
+    for cell in cells:
+        if cell.id == cellId:
+            return cell
+        elif cell.id.startswith(cellId):
+            return cell
+    return None
+
+if __name__ == '__main__':
+    main()
+
+
+
+
+
+
+

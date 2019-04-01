@@ -1,0 +1,373 @@
+#!/usr/bin/python
+# about the chapter 3 : Analyzing Time-Lapse Microscopy Images of Yeast Cell Growth
+
+import math
+import re
+import sys
+import time
+import cStringIO
+import zlib
+
+from scipy.stats import norm
+
+import matplotlib.pyplot as plt
+from skimage import io, filter
+from robertslab.sfile import *
+import robertslab.peaks as peaks
+import robertslab.imaging.yeast.segment as segment
+
+# Some global variables.
+interactive=False
+refImage=None
+refBgMean=0.0
+refBgStd=0.0
+refBeadX=0.0
+refBeadY=0.0
+refGradCutoff=0.0
+    
+def main():    
+    global interactive
+    global refImage
+
+    # Switch the stdout stream since it is where the data will be written to.
+    sys.stdout=sys.stderr
+    
+    # Make sure we have the correct command line arguments.
+    if len(sys.argv) < 4:
+        print "Usage: processing_stage index_file reference_image [interactive]"
+        quit()
+    
+    # Get the arguments.
+    command = sys.argv[1]
+    indexFilename = sys.argv[2]
+    referenceImageFilename = sys.argv[3]
+    if len(sys.argv) >= 5 and sys.argv[4].lower() in ['true', '1', 'yes']:
+        interactive=True
+    
+    # Read the index file.
+    frameIndex={}
+    
+    # Process the reference image.
+    refImage=io.imread(referenceImageFilename)
+    processReferenceImage()
+    
+    # Process records from stdin.
+    inFile=SFile(sys.__stdin__)
+    outFile=SFile(sys.__stdout__)
+    
+    # Read the records.
+    while True:
+        
+        # Read the next record.
+        record=inFile.readNextRecord()
+        if record == None:
+            break
+            
+        processedRecord=False
+        if command == "map":
+            processedRecord = performMap(inFile,outFile,record,frameIndex, showIntermediates=True)
+        elif command == "reduce":
+            processedRecord = performReduce(inFile,outFile,record,frameIndex, showIntermediates=True)
+        else:
+            print "Unknown command %s"%(command)
+            break
+            
+        # If we didn't need to process this record, skip over the data.
+        if not processedRecord:
+            inFile.skipData(record.dataSize)
+            
+    sys.stdout.flush()
+
+
+
+def performMap(inFile,outFile,record,frameIndex, showIntermediates=False):
+    global interactive
+    global refImage
+    global refBgMean,refBgStd,refBeadX,refBeadY
+    global refGradCutoff
+    
+    # Make sure the record and and type are correct.
+    m=re.match("/frame-(\d\d\d\d\d\d).png",record.name)
+    if m == None or record.dataType != "mime:image/png":
+        return False
+    
+    # Extract the frame number.
+    frameNumber=int(m.group(1))
+    
+    print "Processing frame %d"%(frameNumber)
+    
+    if frameNumber > 0:
+        return False    
+    
+    
+    # Make sure this is a brightfield image.
+    
+    # Read the raw data.
+    data=inFile.readData(record.dataSize)
+    
+    # Convert the raw data into an image.
+    im=io.imread(cStringIO.StringIO(data))
+    
+    # Extract a region around the position of the reference bead from the current frame.
+    imBeadX=int(refBeadX)-300
+    imBeadY=int(refBeadY)-300
+    imBead=im[imBeadY:imBeadY+600,imBeadX:imBeadX+600]
+    
+    # Find the center of the bead.
+    (beadX,beadY,unused)=findBeadCenter(imBead, showIntermediates=False)
+    beadX += imBeadX
+    beadY += imBeadY
+    #print "Frame bead center %0.2f %0.2f"%(beadX,beadY)
+    
+    # Extract a region around the bead in the reference image and the current frame.
+    imBeadRefX=int(refBeadX)-100
+    imBeadRefY=int(refBeadY)-100
+    imBeadRef=refImage[imBeadRefY:imBeadRefY+200,imBeadRefX:imBeadRefX+200]
+    imBeadX=int(beadX)-100
+    imBeadY=int(beadY)-100
+    imBead=im[imBeadY:imBeadY+200,imBeadX:imBeadX+200]
+    
+    # Align the region around the bead with the reference image.
+    (dx,dy)=segment.alignImages(imBead,imBeadRef)
+    #print "Additional alignment offset %0.2f %0.2f"%(dx,dy)
+    
+    # Figure out the total image alignemnt.
+    frameDX=imBeadX-imBeadRefX+dx
+    frameDY=imBeadY-imBeadRefY+dy
+    print "Frame offset %0.2f %0.2f"%(frameDX,frameDY)
+    
+    # Re-extract the aligned regions around the bead for use in background calculation.
+    imBeadRefX-=50
+    imBeadRefY-=50
+    imBeadRef=refImage[imBeadRefY:imBeadRefY+300,imBeadRefX:imBeadRefX+300]
+    imBead=im[imBeadRefY+frameDY:imBeadRefY+frameDY+300,imBeadRefX+frameDX:imBeadRefX+frameDX+300]
+    
+    # Calculate the frame background from the region near the bead.
+    (frameMean,frameStd)=calculateBackgroundStats(imBead, showIntermediates=False)
+    print "Frame bg %0.2f %0.2f"%(frameMean,frameStd)
+    
+    # Write out the alignment and normalization statistics.
+    stats=np.zeros((4,),dtype=np.float64)
+    stats[0]=frameDX
+    stats[1]=frameDY
+    stats[2]=frameMean
+    stats[3]=frameStd
+    outFile.writeRecord("/%06d/stats"%(frameNumber), "float64", npData=stats)
+    
+    # Normalize and align the image.
+    if frameDX <= 0:
+        x1s=0
+        x2s=im.shape[1]-frameDX
+        x1d=-frameDX
+        x2d=im.shape[1]
+    else:
+        x1s=frameDX
+        x2s=im.shape[1]
+        x1d=0
+        x2d=im.shape[1]-frameDX
+    if frameDY <= 0:
+        y1s=0
+        y2s=im.shape[0]-frameDY
+        y1d=frameDY
+        y2d=im.shape[0]
+    else:
+        y1s=frameDY
+        y2s=im.shape[0]
+        y1d=0
+        y2d=im.shape[0]-frameDY
+    imAligned=np.zeros(im.shape,dtype=np.uint8)+int(frameMean)
+    imAligned[y1d:y2d,x1d:x2d] = im[y1s:y2s,x1s:x2s]
+    imAligned -= int(frameMean-refBgMean)
+    
+    # Calculate the gradient.
+    (grad,gradThresh,gradDirection)=segment.calculateGradient(imAligned, cutoff=refGradCutoff, showIntermediates=False)
+    gradDirection[gradThresh==0]=0.0
+    print grad.dtype
+    print gradThresh.dtype
+    print gradDirection.dtype
+
+    # Output the record.
+    gradThreshZ=zlib.compress(gradThresh.tostring(),9)
+    outFile.writeRecord("/%06d/gradientThreshold"%(frameNumber), "zlib:uint8", stringData=gradThreshZ)
+    gradDirectionZ=zlib.compress(gradDirection.astype(np.float32).tostring(),9)
+    outFile.writeRecord("/%06d/gradientDirection"%(frameNumber), "zlib:float32", stringData=gradDirectionZ)
+    
+    
+    '''ios=cStringIO.StringIO()
+    io.imsave(ios,imAligned);
+    data=np.fromstring(ios.getvalue(), dtype=np.uint8)
+    outFile.writeRecord("/%06d-aligned.png"%(frameNumber), "mime:image/png", data)
+    ios=cStringIO.StringIO()
+    io.imsave(ios,imAligned);
+    data=np.fromstring(ios.getvalue(), dtype=np.uint8)
+    outFile.writeRecord("/%06d-aligned.png"%(frameNumber), "mime:image/png", data)
+    ios=cStringIO.StringIO()
+    io.imsave(ios,imAligned);
+    data=np.fromstring(ios.getvalue(), dtype=np.uint8)
+    outFile.writeRecord("/%06d-aligned.png"%(frameNumber), "mime:image/png", data)
+    ios=cStringIO.StringIO()
+    io.imsave(ios,imAligned);
+    data=np.fromstring(ios.getvalue(), dtype=np.uint8)
+    outFile.writeRecord("/%06d-aligned.png"%(frameNumber), "mime:image/png", data)'''
+
+    if interactive and showIntermediates:
+        plt.figure()
+        plt.subplot(2,3,1)
+        io.imshow(imBeadRef)
+        plt.subplot(2,3,2)
+        io.imshow(imBead)
+        plt.subplot(2,3,3)
+        io.imshow(128+imBead-imBeadRef)
+        plt.subplot(2,3,4)
+        io.imshow(gradThresh)
+        plt.subplot(2,3,5)
+        io.imshow(gradDirection)
+        io.show()
+    
+    return True
+
+
+def performReduce(inFile,outFile,record,frameIndex, showIntermediates=False):
+    global interactive
+    global refImage
+    global refBgMean,refBgStd,refBeadX,refBeadY
+    
+    print record.name
+    
+    # Make sure the record and and type are correct.
+    m=re.match("/(\d\d\d\d\d\d)/(\w+)",record.name)
+    if m == None:
+        return False
+    
+    # Extract the frame number.
+    frameNumber=int(m.group(1))
+    
+    # Extract the data name.
+    dataName=m.group(2)
+    
+    print "Processing frame %d:%s"%(frameNumber,dataName)
+    
+    if dataName == "stats" and record.dataType == "float64":
+        
+        # Read the frame statistics.
+        stats=inFile.readData(record.dataSize, np.float64)
+        
+        print "Read array with %d entries"%(stats.size)
+        print stats.dtype
+        print stats[0]
+        print stats[1]
+        print stats[2]
+        print stats[3]
+        return True
+        
+    elif dataName == "gradientThreshold" and record.dataType == "zlib:uint8":
+        
+        bz=inFile.readData(record.dataSize, np.uint8)
+        gradThresh=np.reshape(np.fromstring(zlib.decompress(bz), dtype=np.uint8), refImage.shape)
+        plt.figure()
+        plt.subplot(1,1,1)
+        io.imshow(gradThresh)
+        io.show()
+        return True
+        
+    elif dataName == "gradientDirection" and record.dataType == "zlib:float32":
+        
+        bz=inFile.readData(record.dataSize, np.uint8)
+        gradDirection=np.reshape(np.fromstring(zlib.decompress(bz), dtype=np.float32), refImage.shape)
+        plt.figure()
+        plt.subplot(1,1,1)
+        io.imshow(gradDirection)
+        io.show()
+        return True
+        
+    
+    return False
+    
+
+def processReferenceImage():
+    global interactive
+    global refImage
+    global refBgMean,refBgStd,refBeadX,refBeadY
+    global refGradCutoff
+    
+    # Calculate the reference background stats.
+    (refBgMean,refBgStd)=calculateBackgroundStats(refImage, True)
+    print "Ref bg %0.2f %0.2f"%(refBgMean,refBgStd)
+    
+    # Calculate the center of the reference bead.
+    (refBeadX,refBeadY,refGradCutoff)=findBeadCenter(refImage, True)
+    print "Ref bead center %0.2f %0.2f"%(refBeadX,refBeadY)
+    
+    
+def calculateBackgroundStats(im, showIntermediates=False):
+    global interactive
+    
+    # Histogram the data.
+    (imC,imX)=np.histogram(im,bins=np.arange(0,256,1.0))
+    
+    # Find the highest peak, which corresponds to the background.
+    maxima=peaks.findLocalMaxima1D(imC)
+    backgroundPeak=maxima[0]
+    for i in range(1,len(maxima)):
+        if maxima[i].maxValue > backgroundPeak.maxValue:
+            backgroundPeak=maxima[i]
+    
+    # Find the boundaries of the background peak.
+    for i in range(int(backgroundPeak.xc), -1, -1):
+        if imC[i] < backgroundPeak.maxValue*0.05:
+            bgMin=i+1
+            break
+    for i in range(int(backgroundPeak.xc), len(imC)):
+        if imC[i] < backgroundPeak.maxValue*0.05:
+            bgMax=i-1
+            break
+
+    # Calculate the background statistics.
+    D=imC[bgMin:bgMax].astype(np.float64)/np.sum(imC[bgMin:bgMax])
+    B=imX[bgMin:bgMax]
+    bgMean=np.sum(B*D)
+    bgStd=math.sqrt(np.sum(((B-bgMean)**2)*D))
+    
+    if interactive and showIntermediates:
+        plt.figure()
+        plt.subplot(2,1,1)
+        io.imshow(im)
+        plt.subplot(2,1,2)
+        plt.plot(imX[:-1],imC)
+        plt.axvline(bgMean, color='r')
+        plt.axvline(bgMean+3*bgStd, color='g')
+        plt.axvline(bgMean-3*bgStd, color='g')
+        x = range(bgMin,bgMax,1)
+        plt.plot(x, norm.pdf(x,bgMean,bgStd)*np.sum(imC[bgMin:bgMax]),color='r')
+        io.show()
+
+    return (bgMean,bgStd)
+
+def findBeadCenter(im, showIntermediates=False):
+    global interactive
+    
+    # Calculate the gradient of the image.
+    (grad,gradThresh,gradDirection,gradCutoff)=segment.calculateGradient(im, showIntermediates=False)
+    
+    # Calculate the Hough transform.
+    (hough,houghThresh)=segment.calculateHoughTransform(grad, gradThresh, gradDirection, 20, showIntermediates=False)
+    
+    # Estimate the cluster centers from the Hough transform.
+    centers=segment.estimateCenters(hough, houghThresh, showIntermediates=False)
+    
+    # The first center is the strongest, probably the bead.
+    beadX=centers[0][0]
+    beadY=centers[0][1]
+    
+    if interactive and showIntermediates:
+        plt.figure()
+        io.imshow(im)        
+        plt.scatter(beadX,beadY,marker='x',color='g')
+        plt.gcf().gca().add_artist(plt.Circle((beadX,beadY),centers[0][2],color='r',fill=False))
+        plt.axis([0,im.shape[1],im.shape[0],0])
+        io.show()
+
+    return (beadX,beadY,gradCutoff)
+
+if __name__ == '__main__':
+    main()

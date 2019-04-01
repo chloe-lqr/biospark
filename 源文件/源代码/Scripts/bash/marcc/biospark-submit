@@ -1,0 +1,93 @@
+#!/bin/bash
+
+# getopts variables
+OPTIND=1         # Reset in case getopts has been used previously in the shell.
+
+show_help() {
+cat << EOF
+Usage: ${0##*/} <your-script> [-c executor_cores] [-d driver_memory] [-e executor_memory] [-h] [-j jars] [-m master] [-n num_executors]
+    -c executor_cores       Number of cores to use for the driver process
+    -d driver_memory        Amount of memory to use for the driver process
+    -e executor_memory      Amount of memory to use per executor process
+    -h                      display this help and exit
+    -j jars                 any jars specified by this option will be automatically transferred to the cluster
+    -m master               The cluster manager to connect to
+    -p mode                 The cluster manager to connect to
+    -n num_executors        number of spark executors to use for the job
+    -l log_file                 The log file to use, valid when master=slurm
+    -q queue                 The queue to use, valid when master=slurm
+    -a email                The email address to receive notifications, valid when master=slurm
+    -w time                The maximum time for the job to run, valid when master=slurm
+EOF
+}
+
+BS_ROOT_DIR=/home-2/erober32@jhu.edu/share/apps
+BS_JAR_DIR=$BS_ROOT_DIR/lib/biospark/java
+BS_SCRIPT_DIR=$BS_ROOT_DIR/lib/biospark/pyspark
+
+# Initialize argument variables with default values:
+executor_cores=1
+driver_memory="2g"
+executor_memory="2g"
+jars=$BS_JAR_DIR/robertslab-hadoop.jar
+master="yarn"
+deploy_mode="client"
+num_executors=1
+log_file=""
+queue=""
+email_address=""
+wall_time=""
+
+while getopts "c:d:e:hj:m:p:n:l:q:a:w:" opt; do
+    case "$opt" in
+    c)  executor_cores=$OPTARG
+        ;;
+    d)  driver_memory=$OPTARG
+        ;;
+    e)  executor_memory=$OPTARG
+        ;;
+    h)  show_help
+        exit 0
+        ;;
+    j)  jars=$BS_JAR_DIR/robertslab-hadoop.jar:$OPTARG
+        ;;
+    m)  master=$OPTARG
+        ;;
+    p)  deploy_mode=$OPTARG
+        ;;
+    n)  num_executors=$OPTARG
+        ;;
+    l)  log_file=$OPTARG
+        ;;
+    q)  queue=$OPTARG
+        ;;
+    a)  email_address=$OPTARG
+        ;;
+    w)  wall_time=$OPTARG
+        ;;
+    esac
+done
+
+shift $((OPTIND-1))
+
+[ "$1" = "--" ] && shift
+
+SCRIPT_NAME=$1
+shift
+if [ ! -f $SCRIPT_NAME ] && [ -f $BS_SCRIPT_DIR/$SCRIPT_NAME ]; then
+    SCRIPT_NAME=$BS_SCRIPT_DIR/$SCRIPT_NAME
+fi
+
+DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+
+# Run spark submit with the specificed arguments
+if [ $master == "yarn" ]; then
+    echo "master=$master, num-executors=$num_executors, driver-memory=$driver_memory, executor-memory=$executor_memory, executor-cores=$executor_cores, jars=$jars, script-name=$SCRIPT_NAME, script_args=$@"
+    BS_JOB_TOTAL_CORES=$((num_executors*executor_cores)) spark-submit --master $master --deploy-mode --driver-memory $driver_memory $deploy_mode --num-executors $num_executors --executor-cores $executor_cores --executor-memory $executor_memory --jars $jars $SCRIPT_NAME "$@"
+elif [ $master == "slurm" ]; then
+    echo "biospark-slurm-submit $SCRIPT_NAME "$@" $log_file $queue $((num_executors+1)) $executor_cores $email_address $wall_time"
+    biospark-slurm-submit $SCRIPT_NAME "$@" $log_file $queue $((num_executors+1)) $executor_cores $email_address $wall_time
+else
+    echo "master=$master, num-executors=$num_executors, driver-memory=$driver_memory, executor-memory=$executor_memory, executor-cores=$executor_cores, jars=$jars, script-name=$SCRIPT_NAME, script_args=$@"
+    BS_JOB_TOTAL_CORES=$((num_executors*executor_cores)) BS_JOB_SPLIT_SIZE=134217728 spark-submit --master $master --deploy-mode $deploy_mode --driver-memory $driver_memory --driver-cores 12 --total-executor-cores $((num_executors*executor_cores)) --executor-cores $executor_cores --executor-memory $executor_memory --jars $jars $SCRIPT_NAME "$@"
+fi;

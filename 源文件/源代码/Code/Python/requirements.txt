@@ -1,0 +1,6 @@
+argcomplete
+h5py >= 2.3
+mdtraj >= 1.5 --global-option="--disable-openmp"
+numpy >= 1.10
+pathlib
+scipy >= 0.16

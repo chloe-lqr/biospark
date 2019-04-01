@@ -1,0 +1,13 @@
+{"type": "record",
+ "namespace": "robertslab.avro",
+ "name": "NDArray",
+ "fields": [
+     {"name": "array_order", "type": {"type": "enum", "name": "ArrayOrder", "symbols": ["ROW_MAJOR", "COLUMN_MAJOR", "IMPL_ORDER"]}},
+     {"name": "byte_order", "type": {"type": "enum", "name": "ByteOrder", "symbols": ["LITTLE_ENDIAN", "BIG_ENDIAN"]}},
+     {"name": "data_type", "type": {"type": "enum", "name": "DataType", "symbols": ["int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float16", "float32", "float64", "complex64", "complex128"]}},
+     {"name": "shape", "type": {"type": "array", "items": "int"}},
+     {"name": "data",  "type": "bytes"},
+     {"name": "compressed_deflate",  "type": "boolean"},
+     {"name": "compressed_snappy",  "type": "boolean"}
+ ]
+}

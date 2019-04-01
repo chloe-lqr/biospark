@@ -1,0 +1,29 @@
+#!/bin/bash
+# This script runs a biospark cluster in interactive mode, running until the user delete the interactive.running file in the install directory.
+
+if [ -z "$6" ]; then
+  echo "Usage: $0 install_dir master_hostname number_nodes slaves_file hdfs_dir executors_per_node"
+  exit
+fi
+
+# Parse the arguments.
+INSTALL_DIR=$1
+MASTER_HOSTNAME=$2
+NUMBER_NODES=$3
+SLAVES_FILE=$4
+HDFS_DIR=$5
+EXECUTORS_PER_NODE=$6
+
+# Create the running file.
+RUNNING_FILE=$INSTALL_DIR/interactive.running
+touch $RUNNING_FILE
+
+# Loop until the user delete the file.
+echo "Starting interactive mode."
+while [ -f $RUNNING_FILE ]
+do
+  sleep 5
+done
+echo "Finished interactive mode."
+
+biospark-cluster-cachedel $NUMBER_NODES $SLAVES_FILE $HDFS_DIR

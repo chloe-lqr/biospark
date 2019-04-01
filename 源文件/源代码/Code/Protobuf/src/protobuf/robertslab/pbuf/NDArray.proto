@@ -1,0 +1,75 @@
+/*
+ * Copyright (c) 2012-2015 Roberts Group, Johns Hopkins University
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
+ * 
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ * list of conditions and the following disclaimer.
+ * 
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ * this list of conditions and the following disclaimer in the documentation and/or
+ * other materials provided with the distribution.
+ * 
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ * may be used to endorse or promote products derived from this software without
+ * specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Developed by: Roberts Group
+ *               Johns Hopkins University
+ *               http://biophysics.jhu.edu/roberts/
+ *
+ * Author(s): Elijah Roberts
+ */
+
+package robertslab.pbuf;
+
+message NDArray {
+
+    enum ArrayOrder {
+        ROW_MAJOR             = 0;    // Last dimension contiguous.
+        COLUMN_MAJOR          = 1;    // First dimension contiguous
+        IMPL_ORDER            = 2;    // Ordering specific to the implementation.
+    }
+    
+    enum ByteOrder {
+        LITTLE_ENDIAN         = 0;
+        BIG_ENDIAN            = 1;
+    }
+    
+    enum DataType {
+        int8	       = 0;    // Byte (-128 to 127)
+        int16	       = 1;    // Integer (-32768 to 32767)
+        int32	       = 2;    // Integer (-2147483648 to 2147483647)
+        int64	       = 3;    // Integer (-9223372036854775808 to 9223372036854775807)
+        uint8	       = 4;    // Unsigned integer (0 to 255)
+        uint16	       = 5;    // Unsigned integer (0 to 65535)
+        uint32	       = 6;    // Unsigned integer (0 to 4294967295)
+        uint64	       = 7;    // Unsigned integer (0 to 18446744073709551615)
+        float16	       = 8;    // Half precision float: sign bit, 5 bits exponent, 10 bits mantissa
+        float32	       = 9;    // Single precision float: sign bit, 8 bits exponent, 23 bits mantissa
+        float64	       = 10;   // Double precision float: sign bit, 11 bits exponent, 52 bits mantissa
+        complex64      = 11;   // Complex number, represented by two 32-bit floats (real and imaginary components)
+        complex128     = 12;   // Complex number, represented by two 64-bit floats (real and imaginary components)
+    }
+        
+    optional ArrayOrder array_order                 = 1 [default = ROW_MAJOR];
+    optional ByteOrder byte_order                   = 2 [default = LITTLE_ENDIAN];
+    required DataType data_type                     = 3;
+    repeated int32 shape                            = 4;
+    required bytes data                             = 5;
+    optional bool compressed_deflate                = 6 [default = false];
+    optional bool compressed_snappy                 = 7 [default = false];
+}

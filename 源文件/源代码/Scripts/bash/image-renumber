@@ -1,0 +1,25 @@
+#!/bin/bash
+# used in 
+
+if [ -z "$3" ]; then
+    echo "Usage: $0 input_dir image_prefix output_dir [output_prefix]"
+    exit
+fi
+
+inputDir=$1
+imagePrefix=$2
+outputDir=$3
+outputPrefix=
+if [ -z "$4" ]; then
+    outputPrefix=$4
+fi
+
+files=(`find ${inputDir} -name "${imagePrefix}*"|sort`)
+
+destIndex=1;
+for sourceIndex in `seq -f "%g" 0 1 $((${#files[@]}-1))`; do
+    destFile=${outputDir}/${outputPrefix}`seq -f "%06g" $destIndex $destIndex`.png;
+    echo "Linking ../${files[$sourceIndex]} to $destFile";
+    ln -s ../${files[$sourceIndex]} $destFile;
+    destIndex=$((destIndex+1));
+done

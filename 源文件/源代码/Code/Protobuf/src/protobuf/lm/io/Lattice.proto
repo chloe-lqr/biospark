@@ -1,0 +1,68 @@
+/*
+ * University of Illinois Open Source License
+ * Copyright 2008-2011 Luthey-Schulten Group,
+ * Copyright 2012-2014 Roberts Group,
+ * All rights reserved.
+ *
+ * Developed by: Luthey-Schulten Group
+ * 			     University of Illinois at Urbana-Champaign
+ * 			     http://www.scs.uiuc.edu/~schulten
+ *
+ * Developed by: Roberts Group
+ * 			     Johns Hopkins University
+ * 			     http://biophysics.jhu.edu/roberts/
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of
+ * this software and associated documentation files (the Software), to deal with
+ * the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+ * of the Software, and to permit persons to whom the Software is furnished to
+ * do so, subject to the following conditions:
+ *
+ * - Redistributions of source code must retain the above copyright notice,
+ * this list of conditions and the following disclaimers.
+ *
+ * - Redistributions in binary form must reproduce the above copyright notice,
+ * this list of conditions and the following disclaimers in the documentation
+ * and/or other materials provided with the distribution.
+ *
+ * - Neither the names of the Luthey-Schulten Group, University of Illinois at
+ * Urbana-Champaign, the Roberts Group, Johns Hopkins University, nor the names
+ * of its contributors may be used to endorse or promote products derived from
+ * this Software without specific prior written permission.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE CONTRIBUTORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS WITH THE SOFTWARE.
+ *
+ * Author(s): Elijah Roberts
+ */
+
+package lm.io;
+
+import "lm/io/ArrayOrdering.proto";
+import "robertslab/pbuf/NDArray.proto";
+
+message Lattice {
+
+    required int32 x_size                           = 1;
+    required int32 y_size                           = 2;
+    required int32 z_size                           = 3;
+    optional int32 particles_per_site               = 4;
+
+    // Version 1 lattice members.
+    optional ArrayOrdering v1_particles_ordering    = 5;
+    optional bool v1_particles_compressed_deflate   = 9 [default = false];
+    optional bytes v1_particles                     = 6;
+    optional ArrayOrdering v1_sites_ordering        = 7;
+    optional bool v1_sites_compressed_deflate       = 10 [default = false];
+    optional bytes v1_sites                         = 8;
+
+    // Version 2 lattice members.
+    optional robertslab.pbuf.NDArray particles      = 12;    //5D; 1=x_size,2=y_size,3=z_size,4=particles_per_site,5=bytes_per_particle; type=uint8
+    optional robertslab.pbuf.NDArray sites          = 13;    //4D; 1=x_size,2=y_size,3=z_size,4=bytes_per_site; type=uint8
+}

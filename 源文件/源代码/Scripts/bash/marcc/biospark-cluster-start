@@ -1,0 +1,147 @@
+#!/bin/bash
+# This script starts a Hadoop and Spark cluster instance.
+
+if [ -z "$9" ]; then
+  echo "Usage: $0 execution_script arguments* source_dir install_dir master_hostname number_nodes slaves_file hdfs_dir executors_per_node log_dir"
+  exit
+fi
+
+# Parse the arguments.
+EXECUTION_SCRIPT=$1
+ARGS=
+for ((i=2; i<=`expr $# - 8`; i++))
+do
+  eval ARG=\${$i}
+  ARGS="$ARGS $ARG"
+done
+eval SOURCE_DIR=\${`expr $# - 7`}
+eval INSTALL_DIR=\${`expr $# - 6`}
+eval MASTER_HOSTNAME=\${`expr $# - 5`}
+eval NUMBER_NODES=\${`expr $# - 4`}
+eval SLAVES_FILE=\${`expr $# - 3`}
+eval HDFS_DIR=\${`expr $# - 2`}
+eval EXECUTORS_PER_NODE=\${`expr $# - 1`}
+eval LOG_DIR=\${`expr $#`}
+
+echo "Installing Hadoop and Spark from $SOURCE_DIR to $INSTALL_DIR using master $MASTER_HOSTNAME and $NUMBER_NODES nodes from slaves file $SLAVES_FILE with HDFS storage at $HDFS_DIR."
+echo "Using java version: "
+java -version
+
+# Make the hdfs directory on all of the nodes.
+srun --nodes=$NUMBER_NODES --ntasks=$NUMBER_NODES --nodelist=$SLAVES_FILE --cpus-per-task=1 mkdir -p $HDFS_DIR/datanode
+
+# Copy the source files to the install directory.
+echo "Copying Hadoop and Spark packages."
+scp -r $SOURCE_DIR/hadoop/ $INSTALL_DIR
+scp -r $SOURCE_DIR/spark/ $INSTALL_DIR
+
+# Create a file to set the environment variables.
+HADOOP_ENV_FILE=$INSTALL_DIR/biospark-env.sh
+echo "Creating environment variable file: $HADOOP_ENV_FILE"
+cat >$HADOOP_ENV_FILE <<EOF
+export PATH=$INSTALL_DIR/hadoop/bin:$INSTALL_DIR/hadoop/sbin:$INSTALL_DIR/spark/bin:$INSTALL_DIR/spark/sbin:\$PATH
+export HADOOP_INSTALL=$INSTALL_DIR/hadoop
+export HADOOP_PREFIX=$INSTALL_DIR/hadoop
+export HADOOP_MAPRED_HOME=$INSTALL_DIR/hadoop
+export HADOOP_COMMON_HOME=$INSTALL_DIR/hadoop
+export HADOOP_HDFS_HOME=$INSTALL_DIR/hadoop
+export YARN_HOME=$INSTALL_DIR/hadoop
+export HADOOP_COMMON_LIB_NATIVE_DIR=$INSTALL_DIR/hadoop/lib/native
+export HADOOP_OPTS=-Djava.library.path=$INSTALL_DIR/hadoop/lib/native
+export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=cpp
+EOF
+source $INSTALL_DIR/biospark-env.sh
+
+# Modify the template files for Hadoop.
+echo "Customizing template files."
+cp $SLAVES_FILE $INSTALL_DIR/hadoop/etc/hadoop/slaves
+echo $MASTER_HOSTNAME > $INSTALL_DIR/hadoop/etc/hadoop/slaves.dfs.exclude
+echo $MASTER_HOSTNAME > $INSTALL_DIR/hadoop/etc/hadoop/slaves.yarn.exclude
+cat $INSTALL_DIR/hadoop/etc/hadoop/hdfs-site.xml.template | sed 's|TEMPLATE_INSTALL_DIR|'$INSTALL_DIR'|g'  | sed 's|TEMPLATE_HDFS_DIR|'$HDFS_DIR'|g'  > $INSTALL_DIR/hadoop/etc/hadoop/hdfs-site.xml
+cat $INSTALL_DIR/hadoop/etc/hadoop/yarn-site.xml.template | sed 's|TEMPLATE_INSTALL_DIR|'$INSTALL_DIR'|g' | sed 's|TEMPLATE_MASTER_HOSTNAME|'$MASTER_HOSTNAME'|g' | sed 's|TEMPLATE_EXECUTORS_PER_NODE|'$((EXECUTORS_PER_NODE+1))'|g'   > $INSTALL_DIR/hadoop/etc/hadoop/yarn-site.xml
+cat $INSTALL_DIR/hadoop/etc/hadoop/core-site.xml.template | sed 's|TEMPLATE_MASTER_HOSTNAME|'$MASTER_HOSTNAME'|g' > $INSTALL_DIR/hadoop/etc/hadoop/core-site.xml
+cat $INSTALL_DIR/hadoop/etc/hadoop/mapred-site.xml.template | sed 's|TEMPLATE_MASTER_HOSTNAME|'$MASTER_HOSTNAME'|g' > $INSTALL_DIR/hadoop/etc/hadoop/mapred-site.xml
+
+# Modify the template files for Spark.
+cat $INSTALL_DIR/spark/conf/spark-defaults.conf.template | sed 's|TEMPLATE_TMP_DIR|'$HDFS_DIR'|g'  > $INSTALL_DIR/spark/conf/spark-defaults.conf
+cat $INSTALL_DIR/spark/conf/spark-env.sh.template | sed 's|TEMPLATE_INSTALL_DIR|'$INSTALL_DIR'|g'  > $INSTALL_DIR/spark/conf/spark-env.sh
+
+# Create a slaves files without the master node.
+SLAVES_FILE_NO_MASTER=$SLAVES_FILE.nomaster
+tail -n +2 $SLAVES_FILE > $SLAVES_FILE_NO_MASTER
+
+# Format the namenode.
+echo "Formatting namenode."
+hdfs namenode -format > $INSTALL_DIR/hadoop/logs/format.log 2>&1
+
+# Start the dfs.
+echo "Starting dfs."
+hdfs namenode > $INSTALL_DIR/hadoop/logs/namenode.log 2>&1 &
+srun --nodes=$((NUMBER_NODES-1)) --ntasks=$((NUMBER_NODES-1)) --nodelist=$SLAVES_FILE_NO_MASTER --cpus-per-task=1 --output="$INSTALL_DIR/hadoop/logs/datanode-%N.log" taskset -c 0-23 hdfs datanode &
+echo "Sleeping."
+sleep 30
+
+# Initialize the dfs.
+echo "Initializing dfs."
+hdfs dfs -mkdir /user
+hdfs dfs -chmod a+rwx /user
+hdfs dfs -mkdir -p /tmp/hadoop-yarn/staging
+hdfs dfs -mkdir -p /tmp/logs
+hdfs dfs -chmod -R a+rwx /tmp
+
+# Start yarn.
+echo "Starting yarn."
+yarn resourcemanager > $INSTALL_DIR/hadoop/logs/resourcemanager.log 2>&1 &
+srun --nodes=$((NUMBER_NODES-1)) --ntasks=$((NUMBER_NODES-1)) --nodelist=$SLAVES_FILE_NO_MASTER --cpus-per-task=1 --output="$INSTALL_DIR/hadoop/logs/nodemanager-%N.log" taskset -c 0-23 yarn nodemanager &
+echo "Sleeping."
+sleep 30
+
+# Print out the system reports.
+hdfs dfsadmin -report
+yarn node -all -list
+
+# Make sure dfs and yarn started up correctly.
+DFS_RUNNING=$(hdfs dfsadmin -report | grep -c "Live datanodes ($((NUMBER_NODES-1)))")
+YARN_RUNNING=$(yarn node -all -list | grep -c "Total Nodes:$((NUMBER_NODES-1))")
+echo "DFS running: $DFS_RUNNING"
+echo "YARN running: $YARN_RUNNING"
+
+if [ $DFS_RUNNING -eq 1 ] && [ $YARN_RUNNING -eq 1 ]; then    
+    # Run the script.
+    echo "Hadoop startup successful."
+    $EXECUTION_SCRIPT $ARGS $INSTALL_DIR $MASTER_HOSTNAME $NUMBER_NODES $SLAVES_FILE $HDFS_DIR $EXECUTORS_PER_NODE $LOG_DIR
+else
+    echo "Hadoop startup failed."
+fi
+
+# Stop the processes.
+echo "Stopping dfs and yarn."
+jobs
+kill -INT $(jobs -p)
+echo "Sleeping 1."
+sleep 20
+jobs
+kill -KILL $(jobs -p)
+echo "Sleeping 2."
+sleep 10
+jobs
+
+# Remove the hdfs directory on all of the nodes.
+echo "Removing HDFS files from $HDFS_DIR on all nodes."
+srun --nodes=$NUMBER_NODES --ntasks=$NUMBER_NODES --nodelist=$SLAVES_FILE --cpus-per-task=1 rm -rf $HDFS_DIR
+
+# Remove any Hadoop cache files.
+echo "Removing Hadoop cache files from /tmp on all nodes."
+srun --nodes=$NUMBER_NODES --ntasks=$NUMBER_NODES --nodelist=$SLAVES_FILE --cpus-per-task=1 find /tmp -maxdepth 1 -group erober32 -type d -name "hadoop*" -exec rm -rf {} \;
+
+# Remove or save the installation directory.
+if [ $DFS_RUNNING -eq 1 ] && [ $YARN_RUNNING -eq 1 ]; then    
+    echo "Removing Hadoop and Spark packages from $INSTALL_DIR."
+    rm -rf $INSTALL_DIR
+    echo "Succeeded."
+else
+    echo "Preserving Hadoop and Spark packages from $INSTALL_DIR for error analysis."
+    mv $INSTALL_DIR $INSTALL_DIR-error
+    echo "Failed."
+fi
+

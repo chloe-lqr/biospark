@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+
+# getopts variables
+OPTIND=1         # Reset in case getopts has been used previously in the shell.
+
+show_help() {
+cat << EOF
+Usage: ${0##*/} [-h] [-p] [-d dest_host] source_file+ hdfs_directory
+    source_file+                one or more files to copy to the hdfs on dest_host
+    hdfs_directory              destination directory on target hdfs
+    -d dest_host                destination host. Defaults to xanthus
+    -h help                     display this help and exit
+    -p no_preserve_src_dirs     if this flag is not set, the copy operation will preserve the src dir structure.
+                                If the -p flag is set, all files will be flatly copied directly to hdfs_directory
+EOF
+}
+
+if [ -z "$2" ]; then
+  show_help     #"Usage: $0 source_file+ hdfs_directory"
+  exit
+fi
+
+# Initialize argument variables with default values:
+dest_host="xanthus"
+no_preserve_src_dirs=false
+
+while getopts "d:hp" opt
+do
+    case "$opt" in
+    d)  dest_host=$OPTARG
+        ;;
+    h)  show_help
+        exit 0
+        ;;
+    p)  no_preserve_src_dirs=true
+        echo "ignoring source_file directory structure"
+        ;;
+    esac
+done
+
+shift $((OPTIND-1))
+
+eval DEST_PATH=\${`expr $#`}
+
+for ((i=1; i<=`expr $# - 1`; i++))
+do
+    # recursively find all files at the path pointed to by source_file and put them in an array. excludes hidden files, eg .DS_store
+    eval SRC_PATH=\${$i}
+    SRCS=($(find $SRC_PATH \( ! -regex '.*/\..*' \) -type f | sed "s|^\./||"))
+
+    for SRC in ${SRCS[@]}
+    do
+        if [ "$no_preserve_src_dirs" = true ]; then
+            # do not preserve directory structure
+            DEST=$DEST_PATH/`basename $SRC`
+        else
+            # preserve directory structure
+            DEST=$DEST_PATH/$SRC
+        fi
+
+        echo "Copying $i of `expr $# - 1`: $SRC to $DEST"
+        pv $SRC | ssh $dest_host "hdfs dfs -put - $DEST"
+        # extra args for pv in case it can't directly determine the size of a file
+        #pv -s $(du -sk $SRC | awk '{print $1}')k $SRC | ssh xanthus "hdfs dfs -put - $DEST"
+    done
+done

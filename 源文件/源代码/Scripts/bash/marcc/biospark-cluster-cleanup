@@ -1,0 +1,27 @@
+#!/bin/bash
+# This script cleans up after an abnormally terminated biospark cluster.
+
+if [ -z "$1" ]; then
+  echo "Usage: $0 job_number"
+  exit
+fi
+
+# Parse the arguments.
+JOB_ID=$1
+if [ -f $JOB_ID/slaves ]; then
+    SLAVES_FILE=$JOB_ID/slaves
+    NUMBER_NODES=`cat \$SLAVES_FILE|wc -l`
+    HDFS_DIR=/tmp/$JOB_ID
+    
+    # Remove the hdfs directory on all of the nodes.
+    echo "Removing HDFS files from $HDFS_DIR on all nodes."
+    mpiexec -n $NUMBER_NODES -f $SLAVES_FILE rm -rf $HDFS_DIR
+    
+    # Remove any Hadoop cache files.
+    echo "Removing Hadoop cache files from /tmp on all nodes."
+    mpiexec -n $NUMBER_NODES -f $SLAVES_FILE find /tmp -maxdepth 1 -group erober32 -type d -name "hadoop*" -exec rm -rf {} \;
+    
+    # Remove the installation directory.
+    echo "Removing Hadoop and Spark packages from $INSTALL_DIR."
+    rm -rf $JOB_ID
+fi
